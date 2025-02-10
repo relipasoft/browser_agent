@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <title>Chat Side Panel</title>
+  <style>
+    /* Style chung cho side panel */
+    body {
+      font-family: Arial, sans-serif;
+      margin: 0;
+      padding: 0;
+      background: #f5f5f5;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+    /* Container hiển thị các tin nhắn chat */
+    #chat-container {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px;
+      background-color: #f5f5f5;
+    }
+    .message {
+      margin: 10px 0;
+      max-width: 80%;
+      padding: 10px;
+      border-radius: 10px;
+      clear: both;
+      word-wrap: break-word;
+    }
+    /* Tin nhắn của người dùng */
+    .user {
+      background-color: #d1e7dd;
+      float: right;
+      text-align: right;
+    }
+    /* Tin nhắn của bot */
+    .bot {
+      background-color: #fff;
+      float: left;
+      text-align: left;
+    }
+    /* Container chứa input và nút gửi */
+    #chat-input-container {
+      display: flex;
+      padding: 10px;
+      background-color: #ffffff;
+      border-top: 1px solid #ddd;
+    }
+    #chat-input {
+      flex: 1;
+      padding: 10px;
+      font-size: 16px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      outline: none;
+    }
+    #send-button {
+      margin-left: 10px;
+      padding: 10px 20px;
+      font-size: 16px;
+      background-color: #007bff;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    #send-button:disabled {
+      background-color: #aaa;
+    }
+  </style>
+</head>
+<body>
+  <!-- Container hiển thị chat -->
+  <div id="chat-container">
+    <!-- Các tin nhắn sẽ được thêm vào đây -->
+  </div>
+
+  <!-- Container chứa input chat và nút gửi -->
+  <div id="chat-input-container">
+    <input type="text" id="chat-input" placeholder="Nhập tin nhắn (task)..." />
+    <button id="send-button">Gửi</button>
+  </div>
+
+  <!-- Tham chiếu đến file JavaScript bên ngoài -->
+  <script src="sidepanel.js"></script>
+</body>
+</html>

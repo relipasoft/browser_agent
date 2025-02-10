@@ -1,0 +1,10 @@
+fastapi==0.115.6
+python-dotenv==1.0.1
+langchain==0.3.14
+browser-use==0.1.21
+pydantic==2.10.5
+openai===1.59.5
+langchain-openai==0.2.14
+langchain-ollama==0.2.2
+langchain-google-genai==2.0.8
+uvicorn==0.22.0

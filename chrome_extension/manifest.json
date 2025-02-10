@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Chat Side Panel Extension",
+  "version": "1.0",
+  "description": "Extension với giao diện chat, gửi task đến API.",
+  "side_panel": {
+    "default_path": "sidepanel.html",
+    "open_panel_text": "Chat"
+  },
+  "permissions": [
+    "tabs",
+    "activeTab",
+    "scripting",
+    "sidePanel"
+  ],
+  "host_permissions": [
+    "http://localhost:8888/*"
+  ]
+}
