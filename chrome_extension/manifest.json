@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Chat Side Panel Extension",
+  "name": "Relipa Browser Agent",
   "version": "1.0",
-  "description": "Extension với giao diện chat, gửi task đến API.",
+  "description": "Extension có thể điều khiển browser để hỗ trợ người dùng giải quyết task cụ thểthể",
   "side_panel": {
     "default_path": "sidepanel.html",
     "open_panel_text": "Chat"
