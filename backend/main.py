@@ -22,7 +22,7 @@ from browser_use import Agent
 from dotenv import load_dotenv
 import platform
 import asyncio
-from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Query, BackgroundTasks,WebSocket
 from pydantic import BaseModel
 from browser_use.browser.browser import Browser, BrowserConfig
 import logging
@@ -31,13 +31,12 @@ from datetime import datetime
 from typing import List, Optional
 from enum import Enum
 from fastapi.middleware.cors import CORSMiddleware
-
 # ----------------------------
 # 1. Configure Logging
 # ----------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
+log_queue = asyncio.Queue()
 # ----------------------------
 # 2. Load Environment Variables
 # ----------------------------
@@ -293,6 +292,7 @@ def read_root():
 # ----------------------------
 # 11. Entry Point
 # ----------------------------
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="127.0.0.1", port=8888, reload=True, workers=1)
