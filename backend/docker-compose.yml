@@ -1,0 +1,24 @@
+version: "3.8"
+
+services:
+  fastapi:
+    build: .
+    ports:
+      - "8888:8888"
+    environment:
+      - UVICORN_HOST=0.0.0.0
+      - UVICORN_PORT=8888
+      # Biến môi trường cho Chrome path (đối với Windows: cần có "chrome.exe")
+      - HOST_CHROME_PATH=/host-chrome/default/chrome.exe
+    volumes:
+      # Volume cho Windows (uncomment nếu host là Windows)
+      - "C:\\Program Files\\Google\\Chrome\\Application:/host-chrome/default"
+      
+      # Volume cho macOS (uncomment nếu host là macOS)
+      # - "/Applications/Google Chrome.app/Contents/MacOS:/host-chrome/default"
+      
+      # Volume cho Linux (uncomment nếu host là Linux)
+      # - "/usr/bin:/host-chrome/default"
+    command: uvicorn main:app --host 0.0.0.0 --port 8888
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

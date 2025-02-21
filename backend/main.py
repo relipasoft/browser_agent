@@ -1,63 +1,81 @@
-# main.py
-
-# Important Instructions:
-# 1. Close any existing Chrome instances.
-# 2. Start Chrome with remote debugging enabled:
-#    /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222
-# 3. Run the FastAPI server:
-#    uvicorn main:app --host 127.0.0.1 --port 8888 --reload --workers 1
-# Make sure you set OPENAI_API_KEY=yourOpenAIKeyHere in your .env file
-
 import os
 os.environ["PYDANTIC_V1_COMPAT_MODE"] = "true"
 
 import sys
-# Nếu chạy trên Windows, thiết lập event loop policy hỗ trợ subprocess
 if sys.platform == "win32":
     import asyncio
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-from langchain_openai import ChatOpenAI
-from browser_use import Agent
-from dotenv import load_dotenv
-import platform
 import asyncio
-from fastapi import FastAPI, HTTPException, Query, BackgroundTasks,WebSocket
-from pydantic import BaseModel
-from browser_use.browser.browser import Browser, BrowserConfig
 import logging
 import traceback
+import platform
+import json  # Dùng để đóng gói message thành JSON
 from datetime import datetime
-from typing import List, Optional
 from enum import Enum
+from typing import List, Optional
+from langchain_openai import ChatOpenAI
+from langchain_ollama import ChatOllama
+from fastapi import FastAPI, BackgroundTasks, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from dotenv import load_dotenv
+
 # ----------------------------
-# 1. Configure Logging
+# 1. Configure Global Logging
 # ----------------------------
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-log_queue = asyncio.Queue()
+
+# Bộ lọc chỉ cho phép log từ module browser_use.agent và các module con của nó.
+class AgentOnlyFilter(logging.Filter):
+    def filter(self, record):
+        return record.name.startswith("browser_use.agent")
+
+# Custom Logging Handler gửi log tới một WebSocket cụ thể,
+# đóng gói message theo định dạng JSON:
+# {
+#    "type": <"process" hoặc "result">,
+#    "message": <nội dung log>
+# }
+class WebSocketTaskLogHandler(logging.Handler):
+    def __init__(self, websocket: WebSocket):
+        super().__init__()
+        self.websocket = websocket
+
+    def emit(self, record):
+        try:
+            # Lấy nội dung message theo formatter (ở đây chúng ta sẽ dùng formatter "%(message)s")
+            message_text = self.format(record)
+            # Nếu logger name là "browser_use.agent.final" thì đây là log final result.
+            msg_type = "result" if record.name == "browser_use.agent.final" else "process"
+            payload = {"type": msg_type, "message": message_text}
+            payload_str = json.dumps(payload)
+            # Gửi message không đồng bộ qua websocket.
+            asyncio.create_task(self.websocket.send_text(payload_str))
+        except Exception:
+            self.handleError(record)
+
+# Cấu hình logging toàn cục cho console (vẫn giữ timestamp, level,...)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
+root_logger = logging.getLogger()
+
 # ----------------------------
 # 2. Load Environment Variables
 # ----------------------------
 load_dotenv()
-
-# Verify the OpenAI API key is loaded
 api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
-    raise ValueError(
-        "OPENAI_API_KEY not found in .env file. Make sure your .env file is set up correctly."
-    )
+    raise ValueError("OPENAI_API_KEY not found in .env file. Please configure your .env file correctly.")
 
 # ----------------------------
 # 3. Initialize FastAPI App
 # ----------------------------
 app = FastAPI(title="AI Agent API with BrowserUse", version="1.0")
-
-# Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For development: allow all origins. In production, specify exact origins.
+    allow_origins=["*"],  # Trong production, hãy giới hạn origin cho phép.
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -66,7 +84,6 @@ app.add_middleware(
 # ----------------------------
 # 4. Define Pydantic Models
 # ----------------------------
-
 class TaskRequest(BaseModel):
     task: str
 
@@ -89,56 +106,99 @@ class TaskRecord(BaseModel):
     error: Optional[str] = None
 
 # ----------------------------
-# 5. Initialize Task Registry
+# 5. Global Task Registry
 # ----------------------------
 task_records: List[TaskRecord] = []
 task_id_counter: int = 0
-task_lock = asyncio.Lock()  # To manage concurrent access to task_records
+task_lock = asyncio.Lock()
 
 # ----------------------------
-# 6. Define Background Task Function
+# 6. Helper Functions & Background Task Function
 # ----------------------------
+from browser_use.browser.browser import Browser, BrowserConfig
+from browser_use import Agent
+from langchain_openai import ChatOpenAI
 
 def get_chrome_path() -> str:
     """
-    Returns the most common Chrome executable path based on the operating system.
-    Raises:
-        FileNotFoundError: If Chrome is not found in the expected path.
+    Trả về đường dẫn của Chrome dựa trên hệ điều hành.
+    Hỗ trợ liên kết với Chrome của máy host khi chạy trong Docker.
     """
-    system = platform.system()
+    # Kiểm tra xem đang chạy trong Docker không
+    in_docker = os.path.exists('/.dockerenv')
     
+    if in_docker:
+        # Khi chạy trong Docker, thử kết nối với Chrome của máy host
+        
+        # Đầu tiên, kiểm tra đường dẫn mặc định (đã điều chỉnh cho Windows)
+        default_chrome_path = "/host-chrome/default/chrome.exe"
+        if os.path.exists(default_chrome_path):
+            return default_chrome_path
+            
+        # Các đường dẫn khác để tương thích ngược
+        host_mapping = {
+            "Windows": "/host-chrome/windows/chrome.exe",
+            "Darwin": "/host-chrome/macos/Google Chrome",
+            "Linux": "/host-chrome/linux/google-chrome"
+        }
+        
+        # Thử các đường dẫn có thể của Chrome từ máy host được mount vào container
+        for path in host_mapping.values():
+            if os.path.exists(path):
+                return path
+                
+        # Nếu không tìm thấy, thử dùng biến môi trường HOST_CHROME_PATH
+        host_chrome = os.environ.get("HOST_CHROME_PATH")
+        if host_chrome and os.path.exists(host_chrome):
+            return host_chrome
+            
+        # Không tìm thấy Chrome nào được mount từ host
+        raise FileNotFoundError("Cannot find Chrome from host. Please mount Chrome executable using volumes in docker-compose.yml or set HOST_CHROME_PATH environment variable.")
+    
+    # Nếu không chạy trong Docker, sử dụng đường dẫn mặc định theo hệ điều hành
+    system = platform.system()
     if system == "Windows":
-        # Common installation path for Windows
-        chrome_path = os.path.join(
-            os.environ.get("PROGRAMFILES", "C:\\Program Files"),
-            "Google\\Chrome\\Application\\chrome.exe"
-        )
+        chrome_paths = [
+            os.path.join(os.environ.get("PROGRAMFILES", "C:\\Program Files"), "Google\\Chrome\\Application\\chrome.exe"),
+            os.path.join(os.environ.get("PROGRAMFILES(X86)", "C:\\Program Files (x86)"), "Google\\Chrome\\Application\\chrome.exe"),
+            os.path.join(os.environ.get("LOCALAPPDATA", "C:\\Users\\User\\AppData\\Local"), "Google\\Chrome\\Application\\chrome.exe")
+        ]
     elif system == "Darwin":
-        # Common installation path for macOS
-        chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        chrome_paths = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        ]
     elif system == "Linux":
-        # Common installation path for Linux
-        chrome_path = "/usr/bin/google-chrome"
+        chrome_paths = [
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/snap/bin/chromium"
+        ]
     else:
         raise FileNotFoundError(f"Unsupported operating system: {system}")
     
-    # Verify that the Chrome executable exists at the determined path
-    if not os.path.exists(chrome_path):
-        raise FileNotFoundError(f"Google Chrome executable not found at: {chrome_path}")
+    # Thử tất cả các đường dẫn có thể
+    for chrome_path in chrome_paths:
+        if os.path.exists(chrome_path):
+            return chrome_path
     
-    return chrome_path
+    raise FileNotFoundError(f"Google Chrome executable not found on {system}")
+
 
 async def execute_task(task_id: int, task: str):
     """
-    Background task to execute the AI agent.
-    Initializes a new browser instance for each task to ensure isolation.
+    Thực hiện Agent:
+      - Cập nhật task record.
+      - Khởi tạo Browser và Agent.
+      - Chạy Agent và ghi log kết quả.
     """
     global task_records
-    browser = None  # Initialize browser instance for this task
+    browser = None
     try:
-        logger.info(f"Starting background task ID {task_id}: {task}")
-        
-        # Create and add the task record with status 'running'
+        # Ghi log bắt đầu task bằng logger có namespace "browser_use.agent"
+        # logging.getLogger("browser_use.agent").info(f"🚀 Starting task: {{\"task\":\"{task}\"}}")
         async with task_lock:
             task_record = TaskRecord(
                 id=task_id,
@@ -148,43 +208,43 @@ async def execute_task(task_id: int, task: str):
             )
             task_records.append(task_record)
         
-        # Initialize a new browser instance for this task
-        logger.info(f"Task ID {task_id}: Initializing new browser instance.")
+        # logging.getLogger("browser_use.agent").info(f"Task ID {task_id}: Initializing new browser instance.")
         browser = Browser(
             config=BrowserConfig(
-                chrome_instance_path=get_chrome_path(),  # Update if different
+                chrome_instance_path=get_chrome_path(),
                 disable_security=True,
-                headless=False,  # Set to True for headless mode
-                # Removed 'remote_debugging_port' as it caused issues
+                headless=False,  # Đổi thành True nếu muốn chạy ẩn
             )
         )
-        logger.info(f"Task ID {task_id}: Browser initialized successfully.")
+        # logging.getLogger("browser_use.agent").info(f"Task ID {task_id}: Browser initialized successfully.")
         
-        # Initialize and run the Agent with the new browser instance
+        # Khởi tạo Agent với Browser và ChatOpenAI LLM.
         agent = Agent(
             task=task,
             llm=ChatOpenAI(model="gpt-4o", api_key=api_key),
+            # llm=ChatOllama(model="qwen2.5",num_ctx=32000),
             browser=browser
         )
-        logger.info(f"Task ID {task_id}: Agent initialized. Running task.")
+        logging.getLogger("browser_use.agent").info(f"Agent initialized. Running task.")
         result = await agent.run()
-        logger.info(f"Task ID {task_id}: Agent.run() completed successfully.")
+        # Log thông báo Agent.run() hoàn thành trước
+        logging.getLogger("browser_use.agent").info(f"Task ID {task_id}: Agent run completed successfully.")
+        # Sau đó, lấy kết quả cuối cùng và log với logger có namespace "browser_use.agent.final"
+        final_result = result.final_result()
+        logging.getLogger("browser_use.agent.final").info(f"{final_result}")
         
-        # Update the task record with status 'completed'
         async with task_lock:
             for record in task_records:
                 if record.id == task_id:
                     record.status = TaskStatus.COMPLETED
                     record.end_time = datetime.utcnow()
                     record.duration = (record.end_time - record.start_time).total_seconds()
-                    record.result = result
+                    record.result = str(final_result)
                     break
 
     except Exception as e:
-        logger.error(f"Error in background task ID {task_id}: {e}")
-        logger.error(traceback.format_exc())
-        
-        # Update the task record with status 'failed'
+        logging.getLogger("browser_use.agent").error(f"Error in background task ID {task_id}: {e}")
+        logging.getLogger("browser_use.agent").error(traceback.format_exc())
         async with task_lock:
             for record in task_records:
                 if record.id == task_id:
@@ -194,105 +254,65 @@ async def execute_task(task_id: int, task: str):
                     record.error = str(e)
                     break
     finally:
-        # Ensure that the browser is closed in case of failure or success
         if browser:
             try:
-                logger.info(f"Task ID {task_id}: Closing browser instance.")
+                logging.getLogger("browser_use.agent").info(f"Task ID {task_id}: Closing browser instance.")
                 await browser.close()
-                logger.info(f"Task ID {task_id}: Browser instance closed successfully.")
+                logging.getLogger("browser_use.agent").info(f"Task ID {task_id}: Browser closed successfully.")
             except Exception as close_e:
-                logger.error(f"Task ID {task_id}: Error closing browser: {close_e}")
-                logger.error(traceback.format_exc())
+                logging.getLogger("browser_use.agent").error(f"Task ID {task_id}: Error closing browser: {close_e}")
+                logging.getLogger("browser_use.agent").error(traceback.format_exc())
 
 # ----------------------------
-# 7. Define POST /run Endpoint
+# 7. WebSocket Endpoint /ws/run (Kết hợp chạy task và nhận log)
 # ----------------------------
-@app.post("/run", response_model=TaskResponse)
-async def run_task_post(request: TaskRequest, background_tasks: BackgroundTasks):
+@app.websocket("/ws/run")
+async def websocket_run(websocket: WebSocket):
     """
-    POST Endpoint to run the AI agent with a specified task.
-    
-    - **task**: The task description for the AI agent.
+    Client kết nối qua WebSocket, gửi nhiệm vụ cần chạy (chuỗi văn bản).
+    Server sẽ gắn handler tạm thời để đẩy log (chỉ log từ browser_use.agent)
+    với định dạng JSON theo pattern:
+      {
+          "type": <"process" hoặc "result">,
+          "message": <nội dung log>
+      }
+    Trong đó, log từ quá trình thực thi có type "process" và final result có type "result".
+    Sau khi task hoàn thành, server gửi thông báo "Task finished." rồi đóng kết nối.
     """
-    global task_id_counter
-    task = request.task
-    logger.info(f"Received task via POST: {task}")
-    
-    # Increment task ID
-    async with task_lock:
-        task_id_counter += 1
-        current_task_id = task_id_counter
-    
-    # Enqueue the background task
-    background_tasks.add_task(execute_task, current_task_id, task)
-    
-    # Respond immediately
-    return TaskResponse(result="Task is being processed.")
+    await websocket.accept()
+    try:
+        # Nhận thông điệp nhiệm vụ từ client
+        data = await websocket.receive_text()
+        task = data.strip()
+        if not task:
+            await websocket.send_text(json.dumps({"type": "error", "message": "Task is empty!"}))
+            await websocket.close()
+            return
 
-# ----------------------------
-# 8. Define GET /run Endpoint
-# ----------------------------
-@app.get("/run", response_model=TaskResponse)
-async def run_task_get(
-    task: str = Query(..., description="The task description for the AI agent."),
-    background_tasks: BackgroundTasks = None
-):
-    """
-    GET Endpoint to run the AI agent with a specified task.
-    
-    - **task**: The task description for the AI agent.
-    """
-    global task_id_counter
-    logger.info(f"Received task via GET: {task}")
-    
-    # Increment task ID
-    async with task_lock:
-        task_id_counter += 1
-        current_task_id = task_id_counter
-    
-    # Enqueue the background task
-    background_tasks.add_task(execute_task, current_task_id, task)
-    
-    # Respond immediately
-    return TaskResponse(result="Task is being processed.")
+        # Cập nhật task id
+        global task_id_counter
+        async with task_lock:
+            task_id_counter += 1
+            current_task_id = task_id_counter
 
-# ----------------------------
-# 9. Define GET /lastResponses Endpoint
-# ----------------------------
-@app.get("/lastResponses", response_model=List[TaskRecord])
-async def get_last_responses(
-    limit: Optional[int] = Query(100, description="Maximum number of task records to return"),
-    status: Optional[TaskStatus] = Query(None, description="Filter by task status")
-):
-    """
-    GET Endpoint to retrieve the last task responses.
-    
-    - **limit**: The maximum number of task records to return (default: 100).
-    - **status**: (Optional) Filter tasks by status ('running', 'completed', 'failed').
-    
-    Returns a list of task records in descending order of task ID.
-    """
-    async with task_lock:
-        filtered_tasks = task_records.copy()
-        if status:
-            filtered_tasks = [task for task in filtered_tasks if task.status == status]
-        # Sort and limit
-        sorted_tasks = sorted(filtered_tasks, key=lambda x: x.id, reverse=True)[:limit]
-        return sorted_tasks
+        # Tạo handler tạm thời gửi log của browser_use.agent đến kết nối này.
+        temp_handler = WebSocketTaskLogHandler(websocket)
+        temp_handler.setLevel(logging.INFO)
+        # Formatter chỉ hiển thị message (loại bỏ datetime, level, ...)
+        temp_handler.setFormatter(logging.Formatter("%(message)s"))
+        temp_handler.addFilter(AgentOnlyFilter())
+        root_logger.addHandler(temp_handler)
 
-# ----------------------------
-# 10. Define Root Endpoint
-# ----------------------------
-@app.get("/")
-def read_root():
-    return {
-        "message": "AI Agent API with BrowserUse is running. Use the /run endpoint with a 'task' field in the POST request body or as a query parameter in a GET request to execute tasks."
-    }
-
-# ----------------------------
-# 11. Entry Point
-# ----------------------------
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8888, reload=True, workers=1)
+        # logging.getLogger("browser_use.agent").info(f"Received task via WebSocket: {task}")
+        # Chạy task (await trực tiếp)
+        await execute_task(current_task_id, task)
+    except Exception as e:
+        logging.getLogger("browser_use.agent").error(f"Error executing task via WebSocket: {e}")
+    finally:
+        # Loại bỏ handler tạm thời
+        root_logger.removeHandler(temp_handler)
+        try:
+            await websocket.send_text(json.dumps({"type": "info", "message": "Task finished."}))
+        except Exception:
+            pass
+        await websocket.close()
